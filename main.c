@@ -77,8 +77,9 @@
 /**
  * @author: tsf
  * @created: 2019-06-05
- * @modified: 2020-04-02
+ * @modified: 2020-07-15
  * @desc: convert this app to external DPDK-16.07-based int-collector.
+ *        and support to parse ML-DATA.
  */
 
 /* do not shown dpdk configuration initialization. */
@@ -112,7 +113,8 @@
 #define INT_DATA_N_PACKETS_LEN       8
 #define INT_DATA_N_BYTES_LEN         8
 #define INT_DATA_QUEUE_LEN           4
-#define INT_DATA_FWD_ACTS            4
+#define INT_DATA_FWD_ACTS_LEN        4
+#define INT_DATA_BER_LEN             8
 
 #define INT_TYPE_VAL             0x0908
 
@@ -151,7 +153,7 @@
 #define PRINT_SECOND_PERFORMANCE    true
 
 /* supported mapInfo */
-#define CPU_BASED_MAPINFO           0x02ff
+#define CPU_BASED_MAPINFO           0x06ff
 #define NP_BASED_MAPINFO            0x031f
 
 /* device number on the link. */
@@ -168,6 +170,7 @@ typedef struct {
 //    uint8_t  hops;
 //    uint16_t map_info;    /* bitmap */
 
+    /* IP layer data. */
     uint32_t switch_id;
     uint32_t in_port;
     uint32_t out_port;
@@ -178,6 +181,9 @@ typedef struct {
     uint64_t n_bytes;
     uint32_t queue_len;
     uint32_t fwd_acts;
+
+    /* optical layer data. */
+    double ber;
 
     uint32_t hash;           /* indicate whether to store into files. */
 } int_item_t;
@@ -546,6 +552,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint64_t n_bytes = 0;
     uint32_t queue_len = 0;
     uint32_t fwd_acts = 0;
+    double ber;
 
     uint32_t switch_type = 0;
     for (i = 0; i < ttl; i++) {
@@ -672,6 +679,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         }
         flow_info.cur_pkt_info[i].fwd_acts = fwd_acts & bos_bit[switch_type];
         /*printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);*/
+
+        if (switch_map_info & (UINT16_C(1)  << 10)) {
+            memcpy(&ber, &pkt[pos], INT_DATA_BER_LEN);
+//            ingress_time = ntohll(ingress_time);
+            pos += INT_DATA_BER_LEN;
+        } else {
+            ber = 0;
+        }
+        flow_info.cur_pkt_info[i].ber = ber;
     }
 
     flow_info.links[i] = '\0';
@@ -687,13 +703,14 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
-            printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
+            printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t\n",
                    NODE_INT_INFO, ufid, print_timestamp,
                    flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
                    flow_info.cur_pkt_info[i].out_port, flow_info.cur_pkt_info[i].ingress_time,
                    flow_info.cur_pkt_info[i].hop_latency, flow_info.cur_pkt_info[i].bandwidth,
                    flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
-                   flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts);
+                   flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts,
+                   flow_info.cur_pkt_info[i].ber);
         }
 #endif
 
