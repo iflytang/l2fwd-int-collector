@@ -359,6 +359,8 @@ static uint64_t timer_period = 10; /* default period is 10 seconds */
 /* Running x second, then automatically quit. used in process_int_pkt() */
 static uint32_t timer_interval = 0;   /* default processing time. 0 means always running. */
 
+static bool SOCK_SHOULD_BE_RUN = false;    /* default false. */
+
 /* Print out statistics on packets dropped */
 static void
 print_stats(void)
@@ -777,6 +779,75 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 		port_statistics[dst_port].tx += sent;
 }
 
+
+#define SERVER_ADDR "192.168.109.221"
+#define SOCKET_PORT 2020
+
+#define MAXLINE 1024
+#define PENDING_QUEUE 10
+#define SLEEP_SECONDS 1
+
+int clientfd;
+int send_flag = 0;    // 1: send; 0: not send.
+pthread_t tid_sock_recv_thread, tid_sock_send_thread;
+bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
+
+/* tsf: tcp sock thread to wait connect <one client at the same time>. */
+static int sock_recv_thread() {
+    char buf_recv[MAXLINE] = {0};
+    char buf_send[MAXLINE] = {0};
+
+    int serverfd;
+    if ((serverfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        printf("create socket error.\n");
+        return -1;
+    }
+
+    struct sockaddr_in server;
+    bzero(&server, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_port = htons(SOCKET_PORT);
+    inet_pton(AF_INET, SERVER_ADDR, &server.sin_addr);
+
+    if (bind(serverfd, (struct sockaddr *) &server, sizeof(server)) < 0) {
+        printf("bind socket error.\n");
+        return -1;
+    }
+
+    if (listen(serverfd, PENDING_QUEUE) < 0) {
+        printf("listen socket error.\n");
+        return -1;
+    }
+
+    struct sockaddr_in client;
+    socklen_t client_len = sizeof(struct sockaddr);
+    while (true) {
+        printf("server <%s> port <%d>, waiting to be connected ...\n", SERVER_ADDR, SOCKET_PORT);
+
+        clientfd = accept(serverfd, (struct sockaddr *) &client, &client_len);
+        if (clientfd < 0) {
+            printf("accept error.\n");
+            return -1;
+        }
+
+        char buf_send[MAXLINE] = {0};
+        send_flag = 1;
+        int send_times = 0;
+        while (send_flag) {
+            double ber = 7.754045171636897e-05;
+            memcpy(buf_send, &ber, sizeof(ber));
+            if ((send(clientfd, buf_send, sizeof(ber), 0)) < 0) {
+                send_flag = 0;
+            }
+            send_times++;
+            sleep(1);
+            bzero(buf_send, MAXLINE);
+            printf("server send:%d,  %.16g\n", send_times, ber);
+        }
+
+    }
+}
+
 /* main processing loop */
 static void
 l2fwd_main_loop(void)
@@ -814,6 +885,15 @@ l2fwd_main_loop(void)
 	}
 
 	while (!force_quit) {
+
+        if (SOCK_SHOULD_BE_RUN & BER_TCP_SOCK_CLIENT_RUN_ONCE) {
+            int ret = pthread_create(&tid_sock_recv_thread, NULL, (void *) &sock_recv_thread, NULL);
+            if (ret == 0) {
+//            pthread_join(tid_sock_recv_thread, NULL);
+                BER_TCP_SOCK_CLIENT_RUN_ONCE = false;
+                RTE_LOG(INFO, L2FWD, " sock_server_thread start.\n");
+            }
+        }
 
 		cur_tsc = rte_rdtsc();
 
@@ -900,7 +980,8 @@ l2fwd_usage(const char *prgname)
 	       "  -p PORTMASK: hexadecimal bitmask of ports to configure\n"
 	       "  -q NQ: number of queue (=ports) per lcore (default is 1)\n"
 		   "  -T PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 10 default, 86400 maximum)\n"
-           "  -R INTERVAL: running INTERVAL seconds to quit INT packet processing (0 to disable, 15 default, 86400 maximum)\n",
+           "  -R INTERVAL: running INTERVAL seconds to quit INT packet processing (0 to disable, 15 default, 86400 maximum)\n"
+           "  -S SOCKET flag (enter number > 1): run collector as socket server, periodically send data to client (now only support for 'ber')\n",
 	       prgname);
 }
 
@@ -972,11 +1053,27 @@ l2fwd_parse_timer_interval(const char *q_arg)
     return n;
 }
 
+
+static int
+l2fwd_parse_sock_flag(const char *q_arg)
+{
+    char *end = NULL;
+    int n;
+
+    /* parse number string */
+    n = strtol(q_arg, &end, 10);
+    if ((q_arg[0] == '\0') || (end == NULL) || (*end != '\0'))
+        return -1;
+
+    return n;
+}
+
 /* Parse the argument given in the command line of the application */
 static int
 l2fwd_parse_args(int argc, char **argv)
 {
-	int opt, ret, timer_secs;
+	int opt, ret, timer_secs, sock_port;
+	int sock_should_be_run;
 	char **argvopt;
 	int option_index;
 	char *prgname = argv[0];
@@ -986,7 +1083,7 @@ l2fwd_parse_args(int argc, char **argv)
 
 	argvopt = argv;
 
-	while ((opt = getopt_long(argc, argvopt, "p:q:T:R:",
+	while ((opt = getopt_long(argc, argvopt, "p:q:T:R:S:",
 				  lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
@@ -1029,6 +1126,16 @@ l2fwd_parse_args(int argc, char **argv)
                 return -1;
             }
             timer_interval = timer_secs;
+            break;
+
+        case 'S':
+            sock_should_be_run = l2fwd_parse_sock_flag(optarg);
+            if (sock_should_be_run < 0) {
+                printf("sock_should_be_run set failed (enter number > 1)\n");
+                l2fwd_usage(prgname);
+                return -1;
+            }
+            SOCK_SHOULD_BE_RUN = sock_should_be_run;
             break;
 
 		/* long options */
