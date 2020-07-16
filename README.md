@@ -18,7 +18,9 @@ make
 
 - App running
 ```
-./build/l2fwd [EAL options] -- -p PORTMASK [-q NQ -T t -R TS]
+./build/l2fwd [EAL options] -- -p PORTMASK [-q NQ -T t -R TS -S 1]
 ```
 
-The CLI can be such as ```./build/l2fwd -c f -n 4 -- -q 4 -p ffff -T 1 -R 10 > test.txt```.
+I add `-S 1` and `SOCK_SHOULD_BE_RUN` parameter to start tcp socket, which conveys optical data (i.e., ber) to remote agent. If `-S 1`, then `SOCK_SHOULD_BE_RUN` will be set as `true`.
+
+The CLI can be such as ```./build/l2fwd -c f -n 4 -- -q 4 -p ffff -S 1 -T 1 -R 10 > test.txt```.
