@@ -466,6 +466,20 @@ uint32_t bos_bit[2] = {0xffffffff, 0x7fffffff};
 
 flow_info_t flow_info = {0};
 
+#define SERVER_ADDR "192.168.109.221"
+#define SOCKET_PORT 2020
+
+#define MAXLINE 1024
+#define PENDING_QUEUE 10
+#define SLEEP_SECONDS 1
+
+int clientfd = 0;
+char buf_send[MAXLINE] = {0};
+bool send_flag = 0;     // 1, send data; 0, stop sending
+int send_times = 0;     // reset for every sock 'accept'
+
+double cur_ber = 0, his_ber = 0;
+
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
@@ -701,10 +715,11 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /* output result about flow_info. <cur, his> */
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
-#ifndef PRINT_NODE_RESULT
+
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
+#ifdef PRINT_NODE_RESULT
             printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t\n",
                    NODE_INT_INFO, ufid, print_timestamp,
                    flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
@@ -713,8 +728,29 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                    flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
                    flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts,
                    flow_info.cur_pkt_info[i].ber);
-        }
 #endif
+
+#ifndef SOCK_DA
+            if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop
+                continue;
+            }
+
+            cur_ber = flow_info.cur_pkt_info[i].ber;
+
+            if ((cur_ber != his_ber) && (send_flag)) {
+                memcpy(buf_send, &cur_ber, sizeof(cur_ber));
+                if ((send(clientfd, buf_send, sizeof(cur_ber), 0)) < 0) {
+                    send_flag = 0;
+                    printf("client socket closed.\n");
+                }
+                send_times++;
+                printf("send ber[%d]: %g\n", send_times, cur_ber);
+                his_ber = cur_ber;
+                bzero(buf_send, MAXLINE);
+            }
+#endif
+        }
+
 
 #ifdef PRINT_LINK_RESULT
         /* print link path */
@@ -780,15 +816,14 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 }
 
 
-#define SERVER_ADDR "192.168.109.221"
-#define SOCKET_PORT 2020
+//#define SERVER_ADDR "192.168.109.221"
+//#define SOCKET_PORT 2020
+//
+//#define MAXLINE 1024
+//#define PENDING_QUEUE 10
+//#define SLEEP_SECONDS 1
 
-#define MAXLINE 1024
-#define PENDING_QUEUE 10
-#define SLEEP_SECONDS 1
-
-int clientfd;
-int send_flag = 0;    // 1: send; 0: not send.
+//int clientfd;
 pthread_t tid_sock_recv_thread, tid_sock_send_thread;
 bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
 
@@ -825,26 +860,28 @@ static int sock_recv_thread() {
         printf("server <%s> port <%d>, waiting to be connected ...\n", SERVER_ADDR, SOCKET_PORT);
 
         clientfd = accept(serverfd, (struct sockaddr *) &client, &client_len);
-        if (clientfd < 0) {
+        if (clientfd <= 0) {
             printf("accept error.\n");
             return -1;
         }
 
-        char buf_send[MAXLINE] = {0};
+        printf("accept one client connection.\n");
+
         send_flag = 1;
-        int send_times = 0;
+        send_times = 0;
+        /*char buf_send[MAXLINE] = {0};
         while (send_flag) {
             double ber = 7.754045171636897e-05;
             memcpy(buf_send, &ber, sizeof(ber));
             if ((send(clientfd, buf_send, sizeof(ber), 0)) < 0) {
                 send_flag = 0;
+                break;
             }
             send_times++;
             sleep(1);
             bzero(buf_send, MAXLINE);
             printf("server send:%d,  %.16g\n", send_times, ber);
-        }
-
+        }*/
     }
 }
 
