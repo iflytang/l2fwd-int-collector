@@ -292,6 +292,7 @@ flow_info_t flow_infos[MAX_FLOWS] = {0};
 static volatile bool force_quit;
 
 #define RTE_LOGTYPE_L2FWD RTE_LOGTYPE_USER1
+#define RTE_LOGTYPE_OCMSOCK RTE_LOGTYPE_USER2
 
 #define NB_MBUF   8192
 
@@ -467,14 +468,14 @@ uint32_t bos_bit[2] = {0xffffffff, 0x7fffffff};
 flow_info_t flow_info = {0};
 
 #define SERVER_ADDR "192.168.109.221"
-#define SOCKET_PORT 2020
+#define SOCKET_OCM_PORT 2020
 
 #define MAXLINE 1024
 #define PENDING_QUEUE 10
 #define SLEEP_SECONDS 1
 
-int clientfd = 0;
-char buf_send[MAXLINE] = {0};
+int clientfd_ocm = 0;
+char buf_send_ber[MAXLINE] = {0};
 bool send_flag = 0;     // 1, send data; 0, stop sending
 int send_times = 0;     // reset for every sock 'accept'
 
@@ -730,7 +731,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                    flow_info.cur_pkt_info[i].ber);
 #endif
 
-#ifndef SOCK_DA
+#ifndef SOCK_DA_TO_OCM
             if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop
                 continue;
             }
@@ -738,15 +739,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             cur_ber = flow_info.cur_pkt_info[i].ber;
 
             if ((cur_ber != his_ber) && (send_flag)) {
-                memcpy(buf_send, &cur_ber, sizeof(cur_ber));
-                if ((send(clientfd, buf_send, sizeof(cur_ber), 0)) < 0) {
+                memcpy(buf_send_ber, &cur_ber, sizeof(cur_ber));
+                if ((send(clientfd_ocm, buf_send_ber, sizeof(cur_ber), 0)) < 0) {
                     send_flag = 0;
-                    printf("client socket closed.\n");
+                    RTE_LOG(INFO, OCMSOCK, "client socket closed.\n");
                 }
                 send_times++;
                 printf("send ber[%d]: %g\n", send_times, cur_ber);
                 his_ber = cur_ber;
-                bzero(buf_send, MAXLINE);
+                bzero(buf_send_ber, MAXLINE);
             }
 #endif
         }
@@ -816,70 +817,64 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 }
 
 
-//#define SERVER_ADDR "192.168.109.221"
-//#define SOCKET_PORT 2020
-//
-//#define MAXLINE 1024
-//#define PENDING_QUEUE 10
-//#define SLEEP_SECONDS 1
-
-//int clientfd;
-pthread_t tid_sock_recv_thread, tid_sock_send_thread;
+pthread_t tid_sock_process_ocm_thread, tid_sock_send_thread;
 bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
 
-/* tsf: tcp sock thread to wait connect <one client at the same time>. */
-static int sock_recv_thread() {
-    char buf_recv[MAXLINE] = {0};
-    char buf_send[MAXLINE] = {0};
+/* tsf: tcp sock thread to wait connect <one client at the same time>.
+ *      this socket collect 'ber' data and then send to the ocm collector (OCM_Monotor_Collector_Ctrl.java).
+ *      the ocm collector leverages 'ber' to adjust <request_frequency, request_slice_precision, etc>.
+ * */
+static int sock_process_ocm_thread() {
+    char buf_recv_ber[MAXLINE] = {0};
 
     int serverfd;
     if ((serverfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        printf("create socket error.\n");
+        RTE_LOG(INFO, OCMSOCK, "create socket error.\n");
         return -1;
     }
 
     struct sockaddr_in server;
     bzero(&server, sizeof(server));
     server.sin_family = AF_INET;
-    server.sin_port = htons(SOCKET_PORT);
+    server.sin_port = htons(SOCKET_OCM_PORT);
     inet_pton(AF_INET, SERVER_ADDR, &server.sin_addr);
 
     if (bind(serverfd, (struct sockaddr *) &server, sizeof(server)) < 0) {
-        printf("bind socket error.\n");
+        RTE_LOG(INFO, OCMSOCK, "bind socket error.\n");
         return -1;
     }
 
     if (listen(serverfd, PENDING_QUEUE) < 0) {
-        printf("listen socket error.\n");
+        RTE_LOG(INFO, OCMSOCK, "listen socket error.\n");
         return -1;
     }
 
     struct sockaddr_in client;
     socklen_t client_len = sizeof(struct sockaddr);
     while (true) {
-        printf("server <%s> port <%d>, waiting to be connected ...\n", SERVER_ADDR, SOCKET_PORT);
+        RTE_LOG(INFO, OCMSOCK, "server <%s> port <%d>, waiting client to be connected ...\n", SERVER_ADDR, SOCKET_OCM_PORT);
 
-        clientfd = accept(serverfd, (struct sockaddr *) &client, &client_len);
-        if (clientfd <= 0) {
+        clientfd_ocm = accept(serverfd, (struct sockaddr *) &client, &client_len);
+        if (clientfd_ocm <= 0) {
             printf("accept error.\n");
             return -1;
         }
 
-        printf("accept one client connection.\n");
+        RTE_LOG(INFO, OCMSOCK, "accept one client connection.\n");
 
         send_flag = 1;
         send_times = 0;
-        /*char buf_send[MAXLINE] = {0};
+        /*char buf_send_ber[MAXLINE] = {0};
         while (send_flag) {
             double ber = 7.754045171636897e-05;
-            memcpy(buf_send, &ber, sizeof(ber));
-            if ((send(clientfd, buf_send, sizeof(ber), 0)) < 0) {
+            memcpy(buf_send_ber, &ber, sizeof(ber));
+            if ((send(clientfd_ocm, buf_send_ber, sizeof(ber), 0)) < 0) {
                 send_flag = 0;
                 break;
             }
             send_times++;
             sleep(1);
-            bzero(buf_send, MAXLINE);
+            bzero(buf_send_ber, MAXLINE);
             printf("server send:%d,  %.16g\n", send_times, ber);
         }*/
     }
@@ -924,11 +919,11 @@ l2fwd_main_loop(void)
 	while (!force_quit) {
 
         if (SOCK_SHOULD_BE_RUN & BER_TCP_SOCK_CLIENT_RUN_ONCE) {
-            int ret = pthread_create(&tid_sock_recv_thread, NULL, (void *) &sock_recv_thread, NULL);
+            int ret = pthread_create(&tid_sock_process_ocm_thread, NULL, (void *) &sock_process_ocm_thread, NULL);
             if (ret == 0) {
-//            pthread_join(tid_sock_recv_thread, NULL);
+//            pthread_join(tid_sock_process_ocm_thread, NULL);
                 BER_TCP_SOCK_CLIENT_RUN_ONCE = false;
-                RTE_LOG(INFO, L2FWD, " sock_server_thread start.\n");
+                RTE_LOG(INFO, OCMSOCK, "sock_process_ocm_thread start.\n");
             }
         }
 
