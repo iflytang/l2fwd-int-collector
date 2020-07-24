@@ -819,6 +819,7 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 
 pthread_t tid_sock_process_ocm_thread, tid_sock_send_thread;
 bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
+#define READ_TRACE_FROM_TXT
 
 /* tsf: tcp sock thread to wait connect <one client at the same time>.
  *      this socket collect 'ber' data and then send to the ocm collector (OCM_Monotor_Collector_Ctrl.java).
@@ -849,6 +850,18 @@ static int sock_process_ocm_thread() {
         return -1;
     }
 
+#ifdef READ_TRACE_FROM_TXT
+    FILE *fp = fopen("Traffic-test-001.txt", "r");   // Traffic-test.txt is rows of [16001, 170000] of Traffic.txt
+//    int trainging_len = 160000;
+//    int testing_len = 10000;
+    if (fp == NULL) {
+        RTE_LOG(INFO, OCMSOCK, "open file error.\n");
+        return 0;
+    }
+
+    RTE_LOG(INFO, OCMSOCK, "traffic file opened successfully.\n");
+#endif
+
     struct sockaddr_in client;
     socklen_t client_len = sizeof(struct sockaddr);
     while (true) {
@@ -861,6 +874,10 @@ static int sock_process_ocm_thread() {
         }
 
         RTE_LOG(INFO, OCMSOCK, "accept one client connection.\n");
+
+#ifdef READ_TRACE_FROM_TXT   // every sock reconnect, reset the fp to file's fisrt row
+        rewind(fp);
+#endif
 
         send_flag = 1;
         send_times = 0;
@@ -877,6 +894,30 @@ static int sock_process_ocm_thread() {
             bzero(buf_send_ber, MAXLINE);
             printf("server send:%d,  %.16g\n", send_times, ber);
         }*/
+
+#ifdef READ_TRACE_FROM_TXT
+        char buf_send_trace[MAXLINE] = {0};
+        float trace = 0.0;
+
+        while (send_flag) {
+            // if fp is at end of file (EOF), return back to first line
+            if (fscanf(fp, "%f", &trace) == EOF) {
+                rewind(fp);
+            }
+
+            memcpy(buf_send_trace, &trace, sizeof(trace));
+            if ((send(clientfd_ocm, buf_send_trace, sizeof(trace), 0)) < 0) {
+                send_flag = 0;
+                break;
+            }
+
+            send_times++;
+            sleep(1);
+            bzero(buf_send_trace, MAXLINE);
+            printf("server send:%d,  %f\n", send_times, trace);
+        }
+#endif
+
     }
 }
 
