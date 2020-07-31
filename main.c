@@ -732,6 +732,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 #endif
 
 #ifndef SOCK_DA_TO_OCM
+            /* we assume first hop's id is 1, which is at bottom of INT stack. */
             if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop
                 continue;
             }
@@ -817,9 +818,16 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 }
 
 
-pthread_t tid_sock_process_ocm_thread, tid_sock_send_thread;
-bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
-#define READ_TRACE_FROM_TXT
+pthread_t tid_sock_process_ocm_thread;   // init ocm socket setup with a thread
+bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;    // only run once, then turn to false
+
+#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL    // test socket send to DL, read trace form txt then send to DL module
+//#define TEST_BER_SEND_TO_OCM_AGENT    // test socket send to OCM agent, using ber data to adjust ocm collection policy
+
+#define DL_COLLECTED_NODES 3      // how many bandwidth that we need to send DL module
+typedef struct struct_bd_info {
+    float bandwidth[DL_COLLECTED_NODES];
+} bd_info_t;
 
 /* tsf: tcp sock thread to wait connect <one client at the same time>.
  *      this socket collect 'ber' data and then send to the ocm collector (OCM_Monotor_Collector_Ctrl.java).
@@ -850,7 +858,9 @@ static int sock_process_ocm_thread() {
         return -1;
     }
 
-#ifdef READ_TRACE_FROM_TXT
+#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL
+    bd_info_t trace_bd_info = {0};
+
     FILE *fp = fopen("Traffic-test-001.txt", "r");   // Traffic-test.txt is rows of [16001, 170000] of Traffic.txt
 //    int trainging_len = 160000;
 //    int testing_len = 10000;
@@ -875,13 +885,14 @@ static int sock_process_ocm_thread() {
 
         RTE_LOG(INFO, OCMSOCK, "accept one client connection.\n");
 
-#ifdef READ_TRACE_FROM_TXT   // every sock reconnect, reset the fp to file's fisrt row
+#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL   // every sock reconnect, reset the fp to file's first line
         rewind(fp);
 #endif
 
         send_flag = 1;
         send_times = 0;
-        /*char buf_send_ber[MAXLINE] = {0};
+#ifdef TEST_BER_SEND_TO_OCM_AGENT
+        char buf_send_ber[MAXLINE] = {0};
         while (send_flag) {
             double ber = 7.754045171636897e-05;
             memcpy(buf_send_ber, &ber, sizeof(ber));
@@ -893,9 +904,10 @@ static int sock_process_ocm_thread() {
             sleep(1);
             bzero(buf_send_ber, MAXLINE);
             printf("server send:%d,  %.16g\n", send_times, ber);
-        }*/
+        }
+#endif
 
-#ifdef READ_TRACE_FROM_TXT
+#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL
         char buf_send_trace[MAXLINE] = {0};
         float trace = 0.0;
 
@@ -905,8 +917,16 @@ static int sock_process_ocm_thread() {
                 rewind(fp);
             }
 
-            memcpy(buf_send_trace, &trace, sizeof(trace));
-            if ((send(clientfd_ocm, buf_send_trace, sizeof(trace), 0)) < 0) {
+            /* send one float. */
+//            memcpy(buf_send_trace, &trace, sizeof(trace));
+
+            /* send float array. */
+            trace_bd_info.bandwidth[0] = trace;
+            trace_bd_info.bandwidth[1] = 1.1;
+            trace_bd_info.bandwidth[2] = 2.2;
+            memcpy(buf_send_trace, &trace_bd_info, sizeof(bd_info_t));
+
+            if ((send(clientfd_ocm, buf_send_trace, sizeof(bd_info_t), 0)) < 0) {
                 send_flag = 0;
                 break;
             }
@@ -914,7 +934,8 @@ static int sock_process_ocm_thread() {
             send_times++;
             sleep(1);
             bzero(buf_send_trace, MAXLINE);
-            printf("server send:%d,  %f\n", send_times, trace);
+            bzero(&trace_bd_info, sizeof(bd_info_t));
+            printf("server send:%d, %f\n", send_times, trace);
         }
 #endif
 
@@ -960,6 +981,7 @@ l2fwd_main_loop(void)
 	while (!force_quit) {
 
         if (SOCK_SHOULD_BE_RUN & BER_TCP_SOCK_CLIENT_RUN_ONCE) {
+            RTE_LOG(INFO, OCMSOCK, "run here.\n");
             int ret = pthread_create(&tid_sock_process_ocm_thread, NULL, (void *) &sock_process_ocm_thread, NULL);
             if (ret == 0) {
 //            pthread_join(tid_sock_process_ocm_thread, NULL);
