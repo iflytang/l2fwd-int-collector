@@ -79,9 +79,6 @@
 //global variable
 double send2Client[MAXDATA];
 pthread_mutex_t mutex;// Create a global mutex
-int print_times = 0;
-bool flag_kjw = true;
-unsigned long long relative_time_kjw_latest = 0;
 int node_data_num = 0;
 uint8_t ttl = 0;
 
