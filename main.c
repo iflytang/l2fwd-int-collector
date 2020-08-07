@@ -73,6 +73,7 @@
 #include <sys/time.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 
 #define MAXDATA 125
 //global variable
@@ -545,7 +546,6 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     }
 
     /* port processing packet rate in 1s, clear after per sec. */
-    send_times++;
     port_recv_int_cnt++;
 
     bool time_interval_should_write = false;
@@ -728,20 +728,6 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 //            flow_info.cur_pkt_info[ttl-1].ingress_time);  // hop ttl of the link
 
     /* output result about flow_info. <cur, his> */
-
-    unsigned long long end_time_kjw = rp_get_us(); // ePrints packets that can be parsed in one second, Note:Print once a second, otherwise it will affect performance
-    unsigned long long relative_time_kjw = (end_time_kjw - relative_start_time) / ONE_SECOND_IN_MS;
-    //printf("end_time_kjw:%llu\n", relative_time_kjw);
-    if(flag_kjw){
-        relative_time_kjw_latest = 1;
-        flag_kjw = false;
-        printf("kjwkjwkjw, %d\n", flow_info.cur_pkt_info[0].switch_id);
-    }
-    if(relative_time_kjw >= relative_time_kjw_latest){
-        printf("jiexi_times:%llu \t, relative_time_kjw:%llu\t relative_time_kjw_latest:%llu\n", send_times, relative_time_kjw, relative_time_kjw_latest);
-        relative_time_kjw_latest = relative_time_kjw + 1;
-    }
-
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
 
@@ -772,8 +758,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             send2Client[i * node_data_num + 11] = flow_info.cur_pkt_info[i].n_packets;
             send2Client[i * node_data_num + 12] = flow_info.cur_pkt_info[i].n_bytes;
             send2Client[i * node_data_num + 13] = flow_info.cur_pkt_info[i].fwd_acts;
-#ifndef PRINT_NODE_RESULT
 
+#ifndef PRINT_NODE_RESULT
             printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t %x\t %d\t \n",
                    NODE_INT_INFO, ufid, print_timestamp,
                    flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
@@ -790,7 +776,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             }
             cur_ber = flow_info.cur_pkt_info[i].ber;
 
-            if ((cur_ber != his_ber) && (seprintf("server <%s> port <%d>, waiting to be connected ...\n", SERVER_ADDR, SOCKET_PORT);nd_flag)) {
+            if ((cur_ber != his_ber) && (send_flag)) {
                 memcpy(buf_send, &cur_ber, sizeof(cur_ber));
                 if ((send(clientfd, buf_send, sizeof(cur_ber), 0)) < 0) {
                     send_flag = 0;
@@ -804,8 +790,6 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 #endif
         }
         pthread_mutex_unlock(&mutex);//release mutex;
-
-
 
 #ifdef PRINT_LINK_RESULT
         /* print link path */
@@ -886,7 +870,6 @@ bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
 static int sock_recv_thread() {
     int send2client_time = 0;
 
-    printf("1234\n");
     char buf_recv[MAXLINE] = {0};
     char buf_send[MAXLINE] = {0};
 
@@ -900,8 +883,7 @@ static int sock_recv_thread() {
     bzero(&server, sizeof(server));
     server.sin_family = AF_INET;
     server.sin_port = htons(SOCKET_PORT);
-    server.sin_addr.s_addr = inet_addr(SERVER_ADDR);
-    //inet_pton(AF_INET, SERVER_ADDR, &server.sin_addr);
+    inet_pton(AF_INET, SERVER_ADDR, &server.sin_addr);
 
     if (bind(serverfd, (struct sockaddr *) &server, sizeof(server)) < 0) {
         printf("bind socket error.\n");
@@ -924,11 +906,11 @@ static int sock_recv_thread() {
             return -1;
         }
 
+        /* every reconnection, reset status. */
         printf("accept one client connection.\n");
         send_flag = 1;
-        unsigned long long relative_start_time1 = rp_get_us();
-        bool flag_kjw1 = true;
-        unsigned long long relative_time_kjw_latest1 = 0;
+        send_times = 0;
+
 #ifdef SOCKET_CLIENT_DATA_PROCESS
         while(send_flag) {
 //            printf("%f \t, %f \n", send2Client[0], send2Client[1]);
@@ -937,54 +919,11 @@ static int sock_recv_thread() {
                 send_flag = 0;
                 printf("client socket closed.\n");
             }
-            //The number of packets sent may be dependent on the rate supported by the Ethernet card
-//            send2client_time++; //Prints packets that can be sented to client in one second, Note:Print once a second, otherwise it will affect performance
-//            unsigned long long end_time_kjw1 = rp_get_us();
-//            unsigned long long relative_time_kjw1 = (end_time_kjw1 - relative_start_time1) / ONE_SECOND_IN_MS;
-//            if(flag_kjw1){
-//                relative_time_kjw_latest1 = 1;
-//                flag_kjw1 = false;
-//                printf("kjw\n");
-//            }
-//            if(relative_time_kjw1 >= relative_time_kjw_latest1){
-//                printf("send2clienttimes:%llu \t, relative_time_kjw:%llu\t relative_time_kjw_latest:%llu\n", send2client_time, relative_time_kjw1, relative_time_kjw_latest1);
-//                relative_time_kjw_latest1 = relative_time_kjw1 + 1;
-//            }
+            send_times++;
             bzero(buf_send, MAXLINE);
-            //usleep(900);
-
         }
 #endif
-//        send_times = 0;
-//        char buf_send[MAXLINE] = {0};
-//        while (send_flag) {
-//            int ttl = 3, ufid = 4, print_timestamp = 5;
-//            send2Client[0] = ttl * 13;
-//            for (i = 0; i < ttl; i++) {
-//                send2Client[i * 3 + 1] = NODE_INT_INFO;
-//                send2Client[i * 3 + 2] = ufid;
-//                send2Client[i * 3 + 3] = print_timestamp;
-//            }
-//            printf("send2Client success.\n");
-//            memcpy(buf_send, &send2Client, sizeof(send2Client));
-//            if ((send(clientfd, buf_send, sizeof(send2Client), 0)) < 0) {
-//                send_flag = 0;
-//                printf("client socket closed.\n");
-//            }
-//            printf("send success\n");
-//            send_times++;
-//            bzero(buf_send, MAXLINE);
-//            double ber = 7.754045171636897e-05;
-//            memcpy(buf_send, &ber, sizeof(ber));
-//            if ((send(clientfd, buf_send, sizeof(ber), 0)) < 0) {
-//                send_flag = 0;
-//                break;
-//            }
-//            send_times++;
-//            sleep(1);
-//            bzero(buf_send, MAXLINE);
-//            printf("server send:%d,  %.16g\n", send_times, ber);
-//        }
+
     }
 }
 
