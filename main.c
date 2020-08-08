@@ -473,6 +473,8 @@ enum SWITCH_TYPE {
 
 /* tofino has 'bos' at bit 32 every 4B. */
 uint32_t bos_bit[2] = {0xffffffff, 0x7fffffff};
+uint64_t bos_ingress_time = 0x000000007fffffff;
+uint32_t bos_hop_latency = 0x0000ffff;
 
 flow_info_t flow_info = {0};
 
@@ -595,7 +597,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         //printf("switch_id: 0x%08x\n", flow_info.cur_pkt_info[i].switch_id);
 
         /* distinguish switch. */
-        if ((0xff000000 & switch_id) == 0x00) {   // device: ovs-pof
+        if ((0xff000000 & switch_id) == 0xff) {   // device: ovs-pof
             switch_map_info = map_info & CPU_BASED_MAPINFO;
             switch_type = OVS_POF;
             /*printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);*/
@@ -632,7 +634,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             ingress_time = 0;
         }
         if (switch_type == TOFINO) {
-            ingress_time = ingress_time & bos_bit[TOFINO];
+            ingress_time = ingress_time & bos_ingress_time;
         }
         flow_info.cur_pkt_info[i].ingress_time = ingress_time;
         /*printf("ufid:%x, pkt_i:%d, ingress_time: 0x%016lx\n", ufid, i, ingress_time);*/
@@ -648,7 +650,11 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         flow_info.max_delay[i] = Max(hop_latency, flow_info.max_delay[i]);
         uint32_t his_hop_latency = flow_info.cur_pkt_info[i].hop_latency;
         flow_info.jitter_delay[i] = AbsMinus(hop_latency, his_hop_latency);
-        flow_info.cur_pkt_info[i].hop_latency = hop_latency & bos_bit[switch_type];
+        if (switch_type == TOFINO) {
+            flow_info.cur_pkt_info[i].hop_latency = hop_latency & bos_hop_latency;
+        } else {
+            flow_info.cur_pkt_info[i].hop_latency = hop_latency & bos_bit[switch_type];
+        }
         /*printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);*/
         /*printf("ufid:%x, pkt_i:%d, latency:%d, jitter: %d, max_delay:%d\n",
                 ufid, i, hop_latency, flow_info.jitter_delay[i], flow_info.max_delay[i]);*/
@@ -756,7 +762,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             send2Client[i * node_data_num + 12] = flow_info.cur_pkt_info[i].n_bytes;
             send2Client[i * node_data_num + 13] = flow_info.cur_pkt_info[i].fwd_acts;
 
-#ifndef PRINT_NODE_RESULT
+#ifdef PRINT_NODE_RESULT
             printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t %x\t %d\t \n",
                    NODE_INT_INFO, ufid, print_timestamp,
                    flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
