@@ -46,6 +46,7 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
@@ -73,6 +74,7 @@
 #include <rte_mbuf.h>
 
 #include <sys/time.h>
+#include <arpa/inet.h>
 
 /**
  * @author: tsf
@@ -138,19 +140,38 @@
 #  define UINT64_C(c)	c ## ULL
 # endif
 
-/* check INT type (0x0908). */
-#define INT_TYPE_CHECK
+/* tsf: #define to control code branch */
+//#define L2_FWD_APP  // if want to run original l2fwd app, uncomment '#define L2_FWD'
+//#define PRINT_NODE_RESULT   // if want to print nodes' parsed INT metadata result, uncomment '#define PRINT_NODE_RESULT'
+//#define PRINT_LINK_RESULT   // if want to print link's information, uncomment '#define PRINT_LINK_RESULT'
+#define INT_TYPE_CHECK      // if want to check INT type (0x0908), uncomment '#define INT_TYPE_CHECK'
+
+#define TIME_INTERVAL_SHOULD_WRITE // if want to set time interval to print result, uncomment '#define TIME_INTERVAL_SHOULD_WRITE'
+//#define PKT_INTERVAL_SHOULD_WRITE  // if want to set packet interval to print result, uncomment '#define PKT_INTERVAL_SHOULD_WRITE'
+//#define PRINT_SECOND_PERFORMANCE   // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
+
+/* tsf: this is real running environment, and only one is in uncomment state. */
+//#define SOCK_DA_TO_OCM      // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
+#define SOCK_DA_TO_DL      // if want to send 'bd_to_dl_info_t' to DL module, uncomment '#define SOCK_DA_TO_DL'
+
+/* tsf: this is test running environment, and only one is in uncomment state. */
+//#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL    // if want to read trace form txt then send to DL module, uncomment '#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL'
+//#define TEST_BER_SEND_TO_OCM_AGENT             // if want to send 'ber' to OCM agent to adjust ocm collection policy, uncomment '#define TEST_BER_SEND_TO_OCM_AGENT'
 
 /* write data every time interval. */
-#define TIME_INTERVAL_SHOULD_WRITE true
-#define ONE_SECOND_IN_MS           1000000.0   // ms
-#define TIME_WRITE_THRESH          200000.0     // ms
+#define ONE_SECOND_IN_US           1000000.0   // us
+#define TIME_WRITE_THRESH          50000.0     // us, can be adjusted
+
+/* tsf: definition for struct 'bd_to_dl_info_t' */
+#define DL_COLLECTED_NODES 3      // how many bandwidth that we need to send DL module
+#define BW_CAL_PERIOD              50000.0     // in ovs-pof, calculate bandwidth every 50 ms
+#define BW_WIN_WIDTH_IN_SECOND     50          // theoretically: ((int) ceil(ONE_SECOND_IN_US / BW_CAL_PERIOD)) = 20,
+                                               // how many different values we can collect in one second, we make it bigger
+#define LINK_BW_CAPACITY           10000.0     // Mbps, = 10 Gbps
+#define ROUND_PRECISION            4           // decimal precision
 
 /* write data every packet interval. */
-#define PKT_INTERVAL_SHOULD_WRITE  true
-#define PKT_WRITE_THRESH           1000       // pkts
-
-#define PRINT_SECOND_PERFORMANCE    true
+//#define PKT_WRITE_THRESH           1000       // pkts, can be adjusted
 
 /* supported mapInfo */
 #define CPU_BASED_MAPINFO           0x06ff
@@ -448,7 +469,7 @@ static uint32_t simple_linear_hash(int_item_t *item) {
 
 static void signal_handler(int signum);
 
-int i;
+int i;  /* used for 'ttl', indicate i-th stack field */
 
 /* indicate DB to recognize data type */
 enum DATA_OUTPUT_TYPE {
@@ -474,12 +495,77 @@ flow_info_t flow_info = {0};
 #define PENDING_QUEUE 10
 #define SLEEP_SECONDS 1
 
-int clientfd_ocm = 0;
+pthread_t tid_sock_process_ocm_thread;   // init ocm socket setup with a thread
+bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;    // only run once, then turn to false
+
+int clientfd_ocm = 0;     // socket
 char buf_send_ber[MAXLINE] = {0};
-bool send_flag = 0;     // 1, send data; 0, stop sending
+char buf_send_bd[MAXLINE] = {0};
+bool send_flag = 0;     // 1, send data; 0, stop sending; default as 0, turn to 1 when sock connects it.
 int send_times = 0;     // reset for every sock 'accept'
 
-double cur_ber = 0, his_ber = 0;
+double cur_ber = 0, his_ber = 0;   // ber info
+
+/* tsf: DL-related bandwidth struct. theoretically, max(bd_win_num) = 20. but, ovs-pof's revalidate threads may calculate
+ *      bandwidth less than 50 ms (then bd_win_num > 20) because fast-path flow rules are removed.
+ * */
+typedef struct struct_win_bd_info {  // to calculate bandwidth at second scale using sliding windows
+    float cur_win_bd[DL_COLLECTED_NODES][BW_WIN_WIDTH_IN_SECOND];  // tsf: bd_to_dl_info_t.bandwidth = average(sum(win_bd[BW_WIN_WIDTH_IN_SECOND]))
+    int bd_win_num[DL_COLLECTED_NODES]; // tsf: indicate now locate in which window, when bd_win_num == BW_WIN_WIDTH_IN_SECOND, send to DL and reset as 0.
+
+    int sec;                   // tsf: record the time
+    int global_time_win_num;   // tsf: indicate which one of 50 ms in a second, reset every second.
+    bool sec_should_write;     // tsf: indicate one second is satisfied, and bandwidth should be calculated to get average
+} bd_win_info_t;
+bd_win_info_t bd_win_info = {0};
+
+typedef struct struct_bd_to_dl_info {  // data sent to DL module
+    int sec; // cur_sec time
+    float bandwidth[DL_COLLECTED_NODES];
+} bd_to_dl_info_t;
+bd_to_dl_info_t bd_to_dl_info = {0};
+
+
+/* tsf: bandwidth average function. after collecting BW_WIN_WIDTH_IN_SECOND points every 50ms, then call this function
+ * to get average bandwidth at second scale.
+ * */
+static void get_mean_bandwidth_at_second_scale(bd_win_info_t *bd_win_info, bd_to_dl_info_t *bd_to_dl_info) {
+
+    int validate_wins;  // each monitored node has one unique validated window number recorder
+    float decimal_round_factor = pow(10, ROUND_PRECISION);
+
+    /* record time to align data. */
+    bd_to_dl_info->sec = bd_win_info->sec;
+
+    /* get average normalized bandwidth. */
+    int cur_switch, cur_win;
+    for (cur_switch = 0; cur_switch < DL_COLLECTED_NODES; cur_switch++) {
+
+        validate_wins = 0;
+        for (cur_win = 0; cur_win <= bd_win_info->bd_win_num[cur_switch]; cur_win++) {  // win_num = [0, bd_win_num[cur_switch]]
+            /* tsf: NOTE! two cases when bd < 1.0:
+             * 1. when ovs-pof starts, its bandwidth period may less than 50 ms, thus bd < 1.0
+             * 2. when in init stage of bd_win_info, its bandwidth is assgined as 0, thus ba < 1.0
+             * */
+            if (bd_win_info->cur_win_bd[cur_switch][cur_win] >= 1.0) {
+                bd_to_dl_info->bandwidth[cur_switch] += bd_win_info->cur_win_bd[cur_switch][cur_win];       // sum
+                validate_wins += 1;
+            }
+        }
+
+        /*printf("get_mean_bandwidth_at_second_scale, cur_switch: %d, cur_wins: %d, validate_wins: %d\n", cur_switch, cur_win, validate_wins);*/
+
+        if (validate_wins > 0) { // avoid nan when validate_wins = 0
+            bd_to_dl_info->bandwidth[cur_switch] = bd_to_dl_info->bandwidth[cur_switch] / validate_wins;    // mean
+            bd_to_dl_info->bandwidth[cur_switch] = bd_to_dl_info->bandwidth[cur_switch] / LINK_BW_CAPACITY; // normalization in [0, 1]
+            bd_to_dl_info->bandwidth[cur_switch] = round(bd_to_dl_info->bandwidth[cur_switch] * decimal_round_factor) /
+                                                   decimal_round_factor; // keep decimal precision
+        }
+    }
+
+    printf("get_mean_bandwidth_at_second_scale: %d sec, %f %f %f\n", bd_win_info->sec, bd_to_dl_info->bandwidth[0],
+            bd_to_dl_info->bandwidth[1], bd_to_dl_info->bandwidth[2]);
+}
 
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
@@ -491,8 +577,6 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         return;
     }
 
-//    flow_info_t flow_info = {0};
-
     uint32_t ufid = get_ufid(pkt);
     /*printf("ufid: 0x%04x\n", ufid);*/
 
@@ -503,7 +587,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
      * ===================== REJECT STAGE =======================
      * */
     /* INT type check. */
-#ifdef INT_TYPE_CHECK
+#ifdef INT_TYPE_CHECK  // if want to check INT type (0x0908), uncomment '#define INT_TYPE_CHECK'
     uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
     uint8_t ttl = pkt[pos++];
 
@@ -521,35 +605,44 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         return;
     }
 
-    flow_info.ufid = ufid;
-    flow_info.hops = ttl;
-    flow_info.map_info = map_info;
-
     /* first_int_pkt_in, init the 'relative_start_time' */
     if (first_pkt_in) {
         relative_start_time = rp_get_us();
         start_time = relative_start_time;
 
+        /* init global variables once. */
+        memset(&flow_info, 0x00, sizeof(flow_info_t));
+        memset(&bd_win_info, 0x00, sizeof(bd_win_info_t));
+        memset(&bd_win_info, 0x00, sizeof(bd_to_dl_info_t));
+
         first_pkt_in = false;
     }
+
+    flow_info.ufid = ufid;
+    flow_info.hops = ttl;
+    flow_info.map_info = map_info;
 
     /* port processing packet rate in 1s, clear after per sec. */
     port_recv_int_cnt++;
 
     bool time_interval_should_write = false;
-#ifdef TIME_INTERVAL_SHOULD_WRITE
+#ifdef TIME_INTERVAL_SHOULD_WRITE  // if want to set time interval to print result, uncomment '#define TIME_INTERVAL_SHOULD_WRITE'
     end_time = rp_get_us();
-    relative_time = (end_time - relative_start_time) / ONE_SECOND_IN_MS;
+    relative_time = (end_time - relative_start_time) / ONE_SECOND_IN_US;
     delta_time = end_time - start_time;
 
-    if (delta_time >= TIME_WRITE_THRESH) {
+    if (delta_time >= TIME_WRITE_THRESH) { // us, threshold 'TIME_WRITE_THRESH' can be adjusted
         time_interval_should_write = true;
         start_time = end_time;
+
+#ifdef SOCK_DA_TO_DL
+        bd_win_info.global_time_win_num += 1;  // to show how many times of 'should_write', reset every second
+#endif
     }
 #endif
 
     bool pkt_interval_should_write = false;
-#ifdef PKT_INTERVAL_SHOULD_WRITE
+#ifdef PKT_INTERVAL_SHOULD_WRITE   // if want to set packet interval to print result, uncomment '#define PKT_INTERVAL_SHOULD_WRITE'
     if (port_recv_int_cnt % PKT_WRITE_THRESH == 0) {
         pkt_interval_should_write = true;
     }
@@ -714,13 +807,13 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 //            flow_info.cur_pkt_info[ttl-1].ingress_time);  // hop ttl of the link
 
     /* output result about flow_info. <cur, his> */
-    if (time_interval_should_write || pkt_interval_should_write) {
+    if (time_interval_should_write || pkt_interval_should_write) { // we can choose two schemes, or any either one.
         // TODO: how to output
 
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
-#ifdef PRINT_NODE_RESULT
+#ifdef PRINT_NODE_RESULT  // if want to print, uncomment '#define PRINT_NODE_RESULT'
             printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t\n",
                    NODE_INT_INFO, ufid, print_timestamp,
                    flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
@@ -731,9 +824,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                    flow_info.cur_pkt_info[i].ber);
 #endif
 
-#ifndef SOCK_DA_TO_OCM
+#ifdef SOCK_DA_TO_OCM   // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
             /* we assume first hop's id is 1, which is at bottom of INT stack. */
-            if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop
+            if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop, can be extended
                 continue;
             }
 
@@ -743,7 +836,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                 memcpy(buf_send_ber, &cur_ber, sizeof(cur_ber));
                 if ((send(clientfd_ocm, buf_send_ber, sizeof(cur_ber), 0)) < 0) {
                     send_flag = 0;
-                    RTE_LOG(INFO, OCMSOCK, "client socket closed.\n");
+                    RTE_LOG(INFO, OCMSOCK, "client socket to OCM collector is closed.\n");
                 }
                 send_times++;
                 printf("send ber[%d]: %g\n", send_times, cur_ber);
@@ -754,7 +847,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         }
 
 
-#ifdef PRINT_LINK_RESULT
+#ifdef PRINT_LINK_RESULT  // if want to print link's information, uncomment '#PRINT_LINK_RESULT'
         /* print link path */
         printf("%d\t %d\t %llu\t ", LINK_PATH, ufid, print_timestamp);
         for (i = 0; i < ttl; i++) {
@@ -773,10 +866,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 //    memcpy(flow_info.his_pkt_info, flow_info.cur_pkt_info, sizeof(flow_info.cur_pkt_info));
 
     /* output how many packets we can parse in a second. */
-    if ((end_time - relative_start_time) >= (ONE_SECOND_IN_MS * (sec_cnt+1))) {
+    if ((end_time - relative_start_time) >= (ONE_SECOND_IN_US * (sec_cnt+1))) {
         sec_cnt++;
 
-#ifndef PRINT_SECOND_PERFORMANCE
+#ifdef SOCK_DA_TO_DL
+        bd_win_info.sec_should_write = true;  // reset every second
+        bd_win_info.sec = sec_cnt;
+#endif
+
+#ifdef PRINT_SECOND_PERFORMANCE  // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
         /* second + recv_pkt/s + write/s */
         printf("%ds\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
 #endif
@@ -785,6 +883,65 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         write_cnt = 0;
         port_recv_int_cnt = 0;
     }
+
+#ifdef SOCK_DA_TO_DL  // if want to send 'bd_to_dl_info_t' to DL module, uncomment '#define SOCK_DA_TO_DL'
+
+    /* tsf: after we collect bandwidth completely, we construct 'bd_to_dl_info_t' and send to DL module */
+    for (i = 0; i < ttl; i++) {
+        int cur_switch_id = flow_info.cur_pkt_info[i].switch_id - 1;  // array starts from 0
+
+        /* now only monitor [0, DL_COLLECTED_NODES) switches */
+        if (cur_switch_id >= DL_COLLECTED_NODES) {
+            /* pass */
+            continue;
+        }
+
+        /* filter redundant same bandwidth value. */
+//        if (bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]] == 0) {  // init stage, bd_win_num = 0
+        if (bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]] == 0) {  // init stage, bd_win_num = 0
+            /* assign values. */
+            bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]] = flow_info.cur_pkt_info[i].bandwidth;
+            /*printf("init stage, cur_switch_id: %d, bd_win_num: %d, time_win_num: %d, bandwidth: %f.\n",
+                   cur_switch_id, bd_win_info.bd_win_num[cur_switch_id], bd_win_info.global_time_win_num,
+                   bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]]);*/
+        }
+
+        if (bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]] != flow_info.cur_pkt_info[i].bandwidth) { // filter stage
+            /* slice window to next one, and update bandwidth info */
+            bd_win_info.bd_win_num[cur_switch_id] += 1;
+            bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]] = flow_info.cur_pkt_info[i].bandwidth;
+            /*printf("filter stage, cur_switch_id: %d, bd_win_num: %d, time_win_num: %d, bandwidth: %f.\n",
+                   cur_switch_id, bd_win_info.bd_win_num[cur_switch_id], bd_win_info.global_time_win_num,
+                   bd_win_info.cur_win_bd[cur_switch_id][bd_win_info.bd_win_num[cur_switch_id]]);*/
+        }
+    }
+
+    if (bd_win_info.sec_should_write && send_flag) {  // send bandwidth at second scale.
+
+        get_mean_bandwidth_at_second_scale(&bd_win_info, &bd_to_dl_info);
+
+        /* during ovs-pof's init stage, the first second's bandwidth is not exactly right. thus we repeat first second trace
+         * for twice, and ignore the first second data. */
+        if (bd_win_info.sec == 1) {
+            goto reset_bd_win_info;
+        }
+
+        /* send data to DL module */
+        memcpy(buf_send_bd, &bd_to_dl_info, sizeof(bd_to_dl_info_t));
+        if ((send(clientfd_ocm, buf_send_bd, sizeof(bd_to_dl_info_t), 0)) < 0) {
+            send_flag = 0;
+            RTE_LOG(INFO, OCMSOCK, "client socket to DL module is closed.\n");
+        }
+
+        /* reset */
+reset_bd_win_info:
+        bzero(&bd_win_info, sizeof(bd_win_info_t));
+        bzero(&bd_to_dl_info, sizeof(bd_to_dl_info_t));
+        bzero(buf_send_bd, MAXLINE);
+    }
+
+#endif
+
 
     /* auto stop test. 'time_interval'=0 to disable to run. */
     if (timer_interval && (sec_cnt > timer_interval)) {  // 15s in default, -R [interval] to adjust
@@ -817,18 +974,6 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 		port_statistics[dst_port].tx += sent;
 }
 
-
-pthread_t tid_sock_process_ocm_thread;   // init ocm socket setup with a thread
-bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;    // only run once, then turn to false
-
-#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL    // test socket send to DL, read trace form txt then send to DL module
-//#define TEST_BER_SEND_TO_OCM_AGENT    // test socket send to OCM agent, using ber data to adjust ocm collection policy
-
-#define DL_COLLECTED_NODES 3      // how many bandwidth that we need to send DL module
-typedef struct struct_bd_info {
-    float bandwidth[DL_COLLECTED_NODES];
-} bd_info_t;
-
 /* tsf: tcp sock thread to wait connect <one client at the same time>.
  *      this socket collect 'ber' data and then send to the ocm collector (OCM_Monotor_Collector_Ctrl.java).
  *      the ocm collector leverages 'ber' to adjust <request_frequency, request_slice_precision, etc>.
@@ -858,8 +1003,8 @@ static int sock_process_ocm_thread() {
         return -1;
     }
 
-#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL
-    bd_info_t trace_bd_info = {0};
+#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL   // if want to read trace form txt then send to DL module, uncomment '#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL'
+    bd_to_dl_info_t trace_bd_to_dl_info = {0};
 
     FILE *fp = fopen("Traffic-test-001.txt", "r");   // Traffic-test.txt is rows of [16001, 170000] of Traffic.txt
 //    int trainging_len = 160000;
@@ -885,13 +1030,16 @@ static int sock_process_ocm_thread() {
 
         RTE_LOG(INFO, OCMSOCK, "accept one client connection.\n");
 
-#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL   // every sock reconnect, reset the fp to file's first line
-        rewind(fp);
+#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL // if want to read trace form txt then send to DL module, uncomment '#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL'
+        rewind(fp);        // every sock reconnect, reset the fp to file's first line
 #endif
 
+        /* every reconnection, reset status. and only sock connects DA, send_flag turn 1 from 0. */
         send_flag = 1;
         send_times = 0;
-#ifdef TEST_BER_SEND_TO_OCM_AGENT
+        sec_cnt = 0;
+
+#ifdef TEST_BER_SEND_TO_OCM_AGENT  // if want to send 'ber' to OCM agent to adjust ocm collection policy, uncomment '#define TEST_BER_SEND_TO_OCM_AGENT'
         char buf_send_ber[MAXLINE] = {0};
         while (send_flag) {
             double ber = 7.754045171636897e-05;
@@ -907,7 +1055,7 @@ static int sock_process_ocm_thread() {
         }
 #endif
 
-#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL
+#ifdef TEST_READ_TRACE_FROM_TXT_SEND_TO_DL  // if want to read trace form txt then send to DL module, uncomment '#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL'
         char buf_send_trace[MAXLINE] = {0};
         float trace = 0.0;
 
@@ -921,12 +1069,12 @@ static int sock_process_ocm_thread() {
 //            memcpy(buf_send_trace, &trace, sizeof(trace));
 
             /* send float array. */
-            trace_bd_info.bandwidth[0] = trace;
-            trace_bd_info.bandwidth[1] = 1.1;
-            trace_bd_info.bandwidth[2] = 2.2;
-            memcpy(buf_send_trace, &trace_bd_info, sizeof(bd_info_t));
+            trace_bd_to_dl_info.bandwidth[0] = trace;
+            trace_bd_to_dl_info.bandwidth[1] = 1.1;
+            trace_bd_to_dl_info.bandwidth[2] = 2.2;
+            memcpy(buf_send_trace, &trace_bd_to_dl_info, sizeof(bd_to_dl_info_t));
 
-            if ((send(clientfd_ocm, buf_send_trace, sizeof(bd_info_t), 0)) < 0) {
+            if ((send(clientfd_ocm, buf_send_trace, sizeof(bd_to_dl_info_t), 0)) < 0) {
                 send_flag = 0;
                 break;
             }
@@ -934,7 +1082,7 @@ static int sock_process_ocm_thread() {
             send_times++;
             sleep(1);
             bzero(buf_send_trace, MAXLINE);
-            bzero(&trace_bd_info, sizeof(bd_info_t));
+            bzero(&trace_bd_to_dl_info, sizeof(bd_to_dl_info_t));
             printf("server send:%d, %f\n", send_times, trace);
         }
 #endif
@@ -1003,7 +1151,7 @@ l2fwd_main_loop(void)
 				portid = l2fwd_dst_ports[qconf->rx_port_list[i]];
 				buffer = tx_buffer[portid];
 
-#ifdef L2_FWD
+#ifdef L2_FWD_APP   // if want to run original l2fwd app, uncomment '#define L2_FWD'
 				sent = rte_eth_tx_buffer_flush(portid, 0, buffer);
 				if (sent)
 					port_statistics[portid].tx += sent;
@@ -1022,7 +1170,7 @@ l2fwd_main_loop(void)
 
 					/* do this only on master core */
 					if (lcore_id == rte_get_master_lcore()) {
-#ifdef L2_FWD
+#ifdef L2_FWD_APP   // if want to run original l2fwd app, uncomment '#define L2_FWD'
 						print_stats();
 #endif
 						/* reset the timer */
@@ -1048,7 +1196,7 @@ l2fwd_main_loop(void)
 			for (j = 0; j < nb_rx; j++) {
 				m = pkts_burst[j];
 				rte_prefetch0(rte_pktmbuf_mtod(m, void *));
-#ifdef L2_FWD
+#ifdef L2_FWD_APP   // if want to run original l2fwd app, uncomment '#define L2_FWD'
 				l2fwd_simple_forward(m, portid);
 #endif
 				process_int_pkt(m, portid);
