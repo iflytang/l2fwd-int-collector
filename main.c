@@ -148,7 +148,7 @@
 
 #define TIME_INTERVAL_SHOULD_WRITE // if want to set time interval to print result, uncomment '#define TIME_INTERVAL_SHOULD_WRITE'
 //#define PKT_INTERVAL_SHOULD_WRITE  // if want to set packet interval to print result, uncomment '#define PKT_INTERVAL_SHOULD_WRITE'
-//#define PRINT_SECOND_PERFORMANCE   // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
+#define PRINT_SECOND_PERFORMANCE   // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
 
 /* tsf: this is real running environment, and only one is in uncomment state. */
 //#define SOCK_DA_TO_OCM      // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
@@ -208,6 +208,9 @@ typedef struct {
 
     uint32_t hash;           /* indicate whether to store into files. */
 } int_item_t;
+
+/* store result seperately */
+FILE *fp_norm_bd, *fp_performance, *fp_int_info;
 
 /*
  * flow-level info. for single flow.
@@ -488,8 +491,14 @@ uint32_t bos_bit[2] = {0xffffffff, 0x7fffffff};
 
 flow_info_t flow_info = {0};
 
-#define SERVER_ADDR "192.168.109.221"
-#define SOCKET_OCM_PORT 2020
+#ifdef SOCK_DA_TO_DL   // SOCK_DA_TO_DL
+    #define SERVER_ADDR "192.168.108.221"   // DL server
+    #define SOCKET_OCM_PORT 2020
+#endif
+#ifdef SOCK_DA_TO_OCM // SOCK_DA_TO_OCM
+    #define SERVER_ADDR "192.168.108.221"  // OCM collector server
+    #define SOCKET_OCM_PORT 2018
+#endif
 
 #define MAXLINE 1024
 #define PENDING_QUEUE 10
@@ -563,8 +572,10 @@ static void get_mean_bandwidth_at_second_scale(bd_win_info_t *bd_win_info, bd_to
         }
     }
 
-    printf("get_mean_bandwidth_at_second_scale: %d sec, %f %f %f\n", bd_win_info->sec, bd_to_dl_info->bandwidth[0],
-            bd_to_dl_info->bandwidth[1], bd_to_dl_info->bandwidth[2]);
+//    printf("get_mean_bandwidth_at_second_scale: %d sec, %f %f %f\n", bd_win_info->sec, bd_to_dl_info->bandwidth[0],
+//            bd_to_dl_info->bandwidth[1], bd_to_dl_info->bandwidth[2]);
+    fprintf(fp_norm_bd, "%d\t %f\t %f\t %f\n", bd_win_info->sec, bd_to_dl_info->bandwidth[0],
+           bd_to_dl_info->bandwidth[1], bd_to_dl_info->bandwidth[2]);
 }
 
 /* tsf: parse, filter and collect the INT fields. */
@@ -798,6 +809,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             ber = 0;
         }
         flow_info.cur_pkt_info[i].ber = ber;
+//        printf("parsed_ber: %f\n", ber);
     }
 
     flow_info.links[i] = '\0';
@@ -876,7 +888,24 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
 #ifdef PRINT_SECOND_PERFORMANCE  // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
         /* second + recv_pkt/s + write/s */
-        printf("%ds\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
+        fprintf(fp_performance, "%d\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
+
+        /* sw1-sw3 */
+        fprintf(fp_int_info, "%d\t %d\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t\n",
+               sec_cnt, switch_map_info,
+               flow_info.cur_pkt_info[2].switch_id, flow_info.cur_pkt_info[2].n_bytes, flow_info.cur_pkt_info[2].n_packets,
+               flow_info.cur_pkt_info[2].hop_latency, flow_info.cur_pkt_info[2].bandwidth,
+               flow_info.cur_pkt_info[1].switch_id, flow_info.cur_pkt_info[1].n_bytes, flow_info.cur_pkt_info[1].n_packets,
+               flow_info.cur_pkt_info[1].hop_latency, flow_info.cur_pkt_info[1].bandwidth,
+               flow_info.cur_pkt_info[0].switch_id, flow_info.cur_pkt_info[0].n_bytes, flow_info.cur_pkt_info[0].n_packets,
+               flow_info.cur_pkt_info[0].hop_latency, flow_info.cur_pkt_info[0].bandwidth
+               );
+
+        if (sec_cnt % 10 == 0) {
+            fflush(fp_int_info);
+            fflush(fp_performance);
+            fflush(fp_norm_bd);
+        }
 #endif
 
         fflush(stdout);
@@ -1468,6 +1497,14 @@ signal_handler(int signum)
 		force_quit = true;
 
 		fflush(stdout);
+
+		/* flush file and close them. */
+		fflush(fp_int_info);
+		fflush(fp_performance);
+		fflush(fp_norm_bd);
+        fclose(fp_int_info);
+        fclose(fp_performance);
+        fclose(fp_norm_bd);
 	}
 }
 
@@ -1489,6 +1526,11 @@ main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 	argc -= ret;
 	argv += ret;
+
+	/* init files */
+	fp_int_info = fopen("result_packet_exp_int_info.txt", "w+");
+	fp_performance = fopen("result_packet_exp_second_performance.txt", "w+");
+	fp_norm_bd = fopen("result_packet_exp_second_normalized_bandwidth.txt", "w+");
 
 	force_quit = false;
 	signal(SIGINT, signal_handler);
