@@ -3,6 +3,7 @@ build
 
 # IDE
 .idea
+cmake-build-debug
 
 # result
 *.txt

@@ -151,8 +151,8 @@
 #define PRINT_SECOND_PERFORMANCE   // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
 
 /* tsf: this is real running environment, and only one is in uncomment state. */
-//#define SOCK_DA_TO_OCM      // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
-#define SOCK_DA_TO_DL      // if want to send 'bd_to_dl_info_t' to DL module, uncomment '#define SOCK_DA_TO_DL'
+#define SOCK_DA_TO_OCM      // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
+//#define SOCK_DA_TO_DL      // if want to send 'bd_to_dl_info_t' to DL module, uncomment '#define SOCK_DA_TO_DL'
 
 /* tsf: this is test running environment, and only one is in uncomment state. */
 //#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL    // if want to read trace form txt then send to DL module, uncomment '#define TEST_READ_TRACE_FROM_TXT_SEND_TO_DL'
@@ -164,6 +164,8 @@
 
 /* tsf: definition for struct 'bd_to_dl_info_t' */
 #define DL_COLLECTED_NODES 3      // how many bandwidth that we need to send DL module
+#define OCM_COLLECTOR_COLLECTED_NODES 3  // how many bandwidth that we need to send ocm collector module
+
 #define BW_CAL_PERIOD              50000.0     // in ovs-pof, calculate bandwidth every 50 ms
 #define BW_WIN_WIDTH_IN_SECOND     50          // theoretically: ((int) ceil(ONE_SECOND_IN_US / BW_CAL_PERIOD)) = 20,
                                                // how many different values we can collect in one second, we make it bigger
@@ -209,8 +211,10 @@ typedef struct {
     uint32_t hash;           /* indicate whether to store into files. */
 } int_item_t;
 
-/* store result seperately */
-FILE *fp_norm_bd, *fp_performance, *fp_int_info;
+/* store result separately */
+FILE *fp_performance;  /* second performance. */
+FILE *fp_norm_bd, *fp_int_info;  /* SOCK_DA_TO_DL */
+FILE *fp_ber_arr; /* SOCK_DA_TO_OCM */
 
 /*
  * flow-level info. for single flow.
@@ -515,6 +519,12 @@ int send_times = 0;     // reset for every sock 'accept'
 
 double cur_ber = 0, his_ber = 0;   // ber info
 
+typedef struct struct_ber_to_da_info {  // data sent to ocm collector module
+//    int sec;
+    double ber[OCM_COLLECTOR_COLLECTED_NODES];
+} ber_to_ocm_collector_info_t;
+ber_to_ocm_collector_info_t ber_to_ocm_collector_info = {0};
+
 /* tsf: DL-related bandwidth struct. theoretically, max(bd_win_num) = 20. but, ovs-pof's revalidate threads may calculate
  *      bandwidth less than 50 ms (then bd_win_num > 20) because fast-path flow rules are removed.
  * */
@@ -623,8 +633,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
         /* init global variables once. */
         memset(&flow_info, 0x00, sizeof(flow_info_t));
+
+#ifdef SOCK_DA_TO_DL
         memset(&bd_win_info, 0x00, sizeof(bd_win_info_t));
         memset(&bd_win_info, 0x00, sizeof(bd_to_dl_info_t));
+#endif
+
+#ifdef SOCK_DA_TO_OCM
+        memset(&ber_to_ocm_collector_info, 0x00, sizeof(ber_to_ocm_collector_info_t));
+#endif
 
         first_pkt_in = false;
     }
@@ -803,7 +820,6 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
         if (switch_map_info & (UINT16_C(1)  << 10)) {
             memcpy(&ber, &pkt[pos], INT_DATA_BER_LEN);
-//            ingress_time = ntohll(ingress_time);
             pos += INT_DATA_BER_LEN;
         } else {
             ber = 0;
@@ -835,27 +851,6 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                    flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts,
                    flow_info.cur_pkt_info[i].ber);
 #endif
-
-#ifdef SOCK_DA_TO_OCM   // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
-            /* we assume first hop's id is 1, which is at bottom of INT stack. */
-            if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop, can be extended
-                continue;
-            }
-
-            cur_ber = flow_info.cur_pkt_info[i].ber;
-
-            if ((cur_ber != his_ber) && (send_flag)) {
-                memcpy(buf_send_ber, &cur_ber, sizeof(cur_ber));
-                if ((send(clientfd_ocm, buf_send_ber, sizeof(cur_ber), 0)) < 0) {
-                    send_flag = 0;
-                    RTE_LOG(INFO, OCMSOCK, "client socket to OCM collector is closed.\n");
-                }
-                send_times++;
-                printf("send ber[%d]: %g\n", send_times, cur_ber);
-                his_ber = cur_ber;
-                bzero(buf_send_ber, MAXLINE);
-            }
-#endif
         }
 
 
@@ -886,10 +881,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         bd_win_info.sec = sec_cnt;
 #endif
 
+#ifdef SOCK_DA_TO_OCM
+//        ber_to_ocm_collector_info.sec = sec_cnt;
+#endif
+
 #ifdef PRINT_SECOND_PERFORMANCE  // if want to print collector's performance, uncomment '#define PRINT_SECOND_PERFORMANCE'
         /* second + recv_pkt/s + write/s */
         fprintf(fp_performance, "%d\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
 
+#ifdef SOCK_DA_TO_DL
         /* sw1-sw3 */
         fprintf(fp_int_info, "%d\t %d\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t\n",
                sec_cnt, switch_map_info,
@@ -900,18 +900,64 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                flow_info.cur_pkt_info[0].switch_id, flow_info.cur_pkt_info[0].n_bytes, flow_info.cur_pkt_info[0].n_packets,
                flow_info.cur_pkt_info[0].hop_latency, flow_info.cur_pkt_info[0].bandwidth
                );
+#endif
+
+#ifdef SOCK_DA_TO_OCM
+        /* sw1-sw3 */
+        fprintf(fp_ber_arr, "%d\t %d\t %.16g\t %d\t %.16g\t %d\t %.16g\t\n",
+                sec_cnt, flow_info.cur_pkt_info[2].switch_id, flow_info.cur_pkt_info[2].ber,
+                flow_info.cur_pkt_info[1].switch_id, flow_info.cur_pkt_info[1].ber,
+                flow_info.cur_pkt_info[0].switch_id, flow_info.cur_pkt_info[0].ber
+                );
+#endif
 
         if (sec_cnt % 10 == 0) {
+#ifdef SOCK_DA_TO_DL
             fflush(fp_int_info);
-            fflush(fp_performance);
             fflush(fp_norm_bd);
+#endif
+
+#ifdef SOCK_DA_TO_OCM
+            fflush(fp_ber_arr);
+#endif
         }
 #endif
 
+        fflush(fp_performance);
         fflush(stdout);
         write_cnt = 0;
         port_recv_int_cnt = 0;
     }
+
+#ifdef SOCK_DA_TO_OCM   // if want to send 'ber' to OCM controller, uncomment '#define SOCK_DA_TO_OCM'
+    for (i = 0; i < ttl; i++) {
+        int cur_switch_id = flow_info.cur_pkt_info[i].switch_id - 1;  // array starts from 0
+
+        /* now only monitor [0, OCM_COLLECTOR_COLLECTED_NODES) switches */
+        if (cur_switch_id >= OCM_COLLECTOR_COLLECTED_NODES) {
+            /* pass */
+            continue;
+        }
+
+        ber_to_ocm_collector_info.ber[cur_switch_id] = flow_info.cur_pkt_info[i].ber;
+
+        if (cur_switch_id == 0) {   // cur_switch_id = sw1
+            cur_ber = flow_info.cur_pkt_info[i].ber;
+
+            if ((cur_ber != his_ber) && (send_flag)) {
+                memcpy(buf_send_ber, &ber_to_ocm_collector_info, sizeof(ber_to_ocm_collector_info_t));
+                if ((send(clientfd_ocm, buf_send_ber, sizeof(ber_to_ocm_collector_info_t), 0)) < 0) {
+                    send_flag = 0;
+                    RTE_LOG(INFO, OCMSOCK, "client socket to OCM collector is closed.\n");
+                }
+                send_times++;
+                printf("sec: %d, send_times:%d, ber[0]: %g\n", sec_cnt, send_times, cur_ber);
+                his_ber = cur_ber;
+                bzero(buf_send_ber, MAXLINE);
+            }
+        }
+    }
+#endif
 
 #ifdef SOCK_DA_TO_DL  // if want to send 'bd_to_dl_info_t' to DL module, uncomment '#define SOCK_DA_TO_DL'
 
@@ -1499,12 +1545,20 @@ signal_handler(int signum)
 		fflush(stdout);
 
 		/* flush file and close them. */
+        fflush(fp_performance);
+        fclose(fp_performance);
+
+#ifdef SOCK_DA_TO_DL
 		fflush(fp_int_info);
-		fflush(fp_performance);
 		fflush(fp_norm_bd);
         fclose(fp_int_info);
-        fclose(fp_performance);
         fclose(fp_norm_bd);
+#endif
+
+#ifdef SOCK_DA_TO_OCM
+        fflush(fp_ber_arr);
+        fclose(fp_ber_arr);
+#endif
 	}
 }
 
@@ -1528,9 +1582,16 @@ main(int argc, char **argv)
 	argv += ret;
 
 	/* init files */
+#ifdef SOCK_DA_TO_DL
+    fp_performance = fopen("result_packet_exp_second_performance.txt", "w+");
 	fp_int_info = fopen("result_packet_exp_int_info.txt", "w+");
-	fp_performance = fopen("result_packet_exp_second_performance.txt", "w+");
 	fp_norm_bd = fopen("result_packet_exp_second_normalized_bandwidth.txt", "w+");
+#endif
+
+#ifdef SOCK_DA_TO_OCM
+    fp_performance = fopen("result_optical_exp_second_performance.txt", "w+");
+    fp_ber_arr = fopen("result_optical_exp_ber_arr.txt", "w+");
+#endif
 
 	force_quit = false;
 	signal(SIGINT, signal_handler);
