@@ -492,6 +492,8 @@ unsigned long long send_times = 0;     // reset for every sock 'accept'
 
 double cur_ber = 0, his_ber = 0;
 
+int switch_mask = 0xff000000; // ovs-pof's 4-th byte must be 0xff, while tofino's 4-th byte can be other value
+
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
@@ -597,7 +599,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         //printf("switch_id: 0x%08x\n", flow_info.cur_pkt_info[i].switch_id);
 
         /* distinguish switch. */
-        if ((0xff000000 & switch_id) == 0xff) {   // device: ovs-pof
+        if ((switch_mask & switch_id) == switch_mask) {   // device: ovs-pof
             switch_map_info = map_info & CPU_BASED_MAPINFO;
             switch_type = OVS_POF;
             /*printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);*/
