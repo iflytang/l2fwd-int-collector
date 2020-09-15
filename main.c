@@ -597,7 +597,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         //printf("switch_id: 0x%08x\n", flow_info.cur_pkt_info[i].switch_id);
 
         /* distinguish switch. */
-        if ((0xff000000 & switch_id) == 0xff) {   // device: ovs-pof
+        if ((0xff000000 & switch_id) == 0xff000000) {   // device: ovs-pof
             switch_map_info = map_info & CPU_BASED_MAPINFO;
             switch_type = OVS_POF;
             /*printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);*/
@@ -752,7 +752,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         send2Client[4] = ufid;
         node_data_num = cnt_1;
         for (i = 0; i < ttl; i++) {
-            send2Client[i * node_data_num + 5] = flow_info.cur_pkt_info[i].switch_id;
+            send2Client[i * node_data_num + 5] = flow_info.cur_pkt_info[i].switch_id & 0x00000000000000ff;
             send2Client[i * node_data_num + 6] = flow_info.cur_pkt_info[i].in_port;
             send2Client[i * node_data_num + 7] = flow_info.cur_pkt_info[i].out_port;
             send2Client[i * node_data_num + 8] = flow_info.cur_pkt_info[i].ingress_time;
@@ -763,14 +763,19 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             send2Client[i * node_data_num + 13] = flow_info.cur_pkt_info[i].fwd_acts;
 
 #ifdef PRINT_NODE_RESULT
-            printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t %x\t %d\t \n",
-                   NODE_INT_INFO, ufid, print_timestamp,
-                   flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
-                   flow_info.cur_pkt_info[i].out_port, flow_info.cur_pkt_info[i].ingress_time,
-                   flow_info.cur_pkt_info[i].hop_latency, flow_info.cur_pkt_info[i].bandwidth,
-                   flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
-                   flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts,
-                   flow_info.cur_pkt_info[i].ber, switch_map_info, cnt_1);
+//            if ((end_time - relative_start_time) >= (ONE_SECOND_IN_MS * (sec_cnt+1))) {//print/1s
+//                if(i == ttl - 1) {
+//                    sec_cnt++;
+//                }
+                printf("%d\t %d\t %llu\t %08x\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t %x\t %d\t \n",
+                       NODE_INT_INFO, ufid, print_timestamp,
+                       flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
+                       flow_info.cur_pkt_info[i].out_port, flow_info.cur_pkt_info[i].ingress_time,
+                       flow_info.cur_pkt_info[i].hop_latency, flow_info.cur_pkt_info[i].bandwidth,
+                       flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
+                       flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts,
+                       flow_info.cur_pkt_info[i].ber, switch_map_info, cnt_1);
+//            }
 #endif
 
 #ifdef SOCK_DA
@@ -820,6 +825,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         /* second + recv_pkt/s + write/s */
         printf("%ds\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
 #endif
+
 
         fflush(stdout);
         write_cnt = 0;
