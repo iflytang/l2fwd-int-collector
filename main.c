@@ -599,11 +599,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         //printf("switch_id: 0x%08x\n", flow_info.cur_pkt_info[i].switch_id);
 
         /* distinguish switch. */
-<<<<<<< HEAD
-        if ((0xff000000 & switch_id) == 0xff000000) {   // device: ovs-pof
-=======
+
         if ((switch_mask & switch_id) == switch_mask) {   // device: ovs-pof
->>>>>>> 90ff6dc00e4e03dbd3ac8852e119c99c67f1f0bf
             switch_map_info = map_info & CPU_BASED_MAPINFO;
             switch_type = OVS_POF;
             /*printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);*/
