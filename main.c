@@ -891,8 +891,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
 #ifdef SOCK_DA_TO_DL
         /* sw1-sw3 */
-        fprintf(fp_int_info, "%d\t %d\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t\n",
-               sec_cnt, switch_map_info,
+        fprintf(fp_int_info, "%d\t %d\t %d\t %04x\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t %d\t %ld\t %ld\t %d\t %f\t\n",
+               sec_cnt, pkt_len, pos-INT_HEADER_BASE, switch_map_info,
                flow_info.cur_pkt_info[2].switch_id, flow_info.cur_pkt_info[2].n_bytes, flow_info.cur_pkt_info[2].n_packets,
                flow_info.cur_pkt_info[2].hop_latency, flow_info.cur_pkt_info[2].bandwidth,
                flow_info.cur_pkt_info[1].switch_id, flow_info.cur_pkt_info[1].n_bytes, flow_info.cur_pkt_info[1].n_packets,
